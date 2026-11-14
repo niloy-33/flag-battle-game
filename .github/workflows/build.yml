@@ -12,7 +12,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
@@ -145,3 +146,250 @@ jobs:
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
           <title>Flag Battle</title>
+          <style>
+          :root {
+            --bg: #eef0f6; --ink: #1b2340; --arena: #fbfcff; --ball: #ffffff; --accent: #d98e00; --muted: #5b6585;
+            box-sizing: border-box;
+            padding-top: env(safe-area-inset-top, 0px);
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+          }
+          @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) { --bg: #0e1424; --ink: #e8ecfa; --arena: #161e36; --ball: #26304f; --accent: #ffc247; --muted: #98a3c7; }
+          }
+          :root[data-theme="dark"] { --bg: #0e1424; --ink: #e8ecfa; --arena: #161e36; --ball: #26304f; --accent: #ffc247; --muted: #98a3c7; }
+          * { box-sizing: border-box; }
+          html, body { height: 100%; margin: 0; }
+          body {
+            background: var(--bg); color: var(--ink);
+            font-family: "Hind Siliguri", system-ui, sans-serif;
+            display: flex; flex-direction: column; overflow: hidden; user-select: none; -webkit-user-select: none;
+          }
+          header { padding: 10px 16px 6px; }
+          .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 20px; font-weight: 700; }
+          #feed { min-height: 24px; font-size: 16px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          main { position: relative; flex: 1; min-height: 0; margin: 0 10px 10px; border-radius: 16px; background: var(--arena); overflow: hidden; }
+          canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+          #win {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;
+            background: color-mix(in srgb, var(--arena) 80%, transparent);
+          }
+          #win[hidden] { display: none; }
+          .card { text-align: center; }
+          .card .flag { font-size: 110px; line-height: 1.1; font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+          .card h1 { margin: 6px 0; font-size: 36px; }
+          .card p { margin: 4px 0; font-size: 18px; color: var(--muted); }
+          </style>
+          </head>
+          <body>
+          <header>
+            <div class="row"><span>Left: <span id="left">195</span> countries</span><span>Match <span id="mt">1</span></span></div>
+            <div id="feed">Battle starting…</div>
+          </header>
+          <main>
+            <canvas id="c"></canvas>
+            <div id="win" hidden>
+              <div class="card">
+                <div class="flag" id="wflag"></div>
+                <h1 id="wname"></h1>
+                <p>Champion!</p>
+                <p id="count"></p>
+              </div>
+            </div>
+          </main>
+
+          <script>
+          // Country codes (ISO). Flag emoji and English names are built from them.
+          const CODES = 'AD AE AF AG AL AM AO AR AT AU AZ BA BB BD BE BF BG BH BI BJ BN BO BR BS BT BW BY BZ CA CD CF CG CH CI CL CM CN CO CR CU CV CY CZ DE DJ DK DM DO DZ EC EE EG ER ES ET FI FJ FM FR GA GB GD GE GH GM GN GQ GR GT GW GY HN HR HT HU ID IE IL IN IQ IR IS IT JM JO JP KE KG KH KI KM KN KP KR KW KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MG MH MK ML MM MN MR MT MU MV MW MX MY MZ NA NE NG NI NL NO NP NR NZ OM PA PE PG PH PK PL PS PT PW PY QA RO RS RU RW SA SB SC SD SE SG SI SK SL SM SN SO SR SS ST SV SY SZ TD TG TH TJ TL TM TN TO TR TT TV TZ UA UG US UY UZ VA VC VE VN VU WS YE ZA ZM ZW'.split(' ');
+          let nameOf = c => c;
+          try { const dn = new Intl.DisplayNames(['en'], { type: 'region' }); nameOf = c => dn.of(c) || c; } catch (e) {}
+          const flagOf = c => String.fromCodePoint(...[...c].map(ch => 127397 + ch.charCodeAt(0)));
+
+          const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+          const leftEl = document.getElementById('left'), mtEl = document.getElementById('mt'), feedEl = document.getElementById('feed');
+          const winEl = document.getElementById('win'), countEl = document.getElementById('count');
+          const SPEED = 140;           // flag speed (was 90)
+          const WAIT = 6;              // seconds before the next match
+          const GAP0 = -Math.PI / 2;  // where the opening starts (top)
+          const ROT = 0.5;            // ring rotation speed (radians per second)
+          let GAP_A = GAP0;           // current direction of the opening
+          let W = 0, H = 0, cx = 0, cy = 0, Ra = 100, R = 10;
+          let balls = [], left = 0, elapsed = 0, matches = 0, over = false, overT = 0, last = 0, col = {};
+          let rotA = 0, fm = 1, rm = 1; // ring angle, flag speed multiplier, ring speed multiplier
+
+          const norm = a => Math.atan2(Math.sin(a), Math.cos(a));
+          // The opening widens slowly so every match is sure to finish.
+          const gapHalf = () => Math.min(0.8, 0.36 + elapsed / 150);
+          const inGap = ang => Math.abs(norm(ang - GAP_A)) < gapHalf();
+
+          function readColors() {
+            const s = getComputedStyle(document.documentElement);
+            ['ink', 'ball', 'accent', 'muted'].forEach(k => col[k] = s.getPropertyValue('--' + k).trim());
+          }
+
+          function geometry() {
+            const r = cv.getBoundingClientRect();
+            W = r.width; H = r.height;
+            const dpr = window.devicePixelRatio || 1;
+            cv.width = W * dpr; cv.height = H * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            Ra = Math.min(W, H) / 2 - 28; cx = W / 2; cy = H / 2;
+            readColors();
+          }
+
+          window.addEventListener('resize', () => {
+            geometry();
+            balls.forEach(b => {
+              const dx = b.x - cx, dy = b.y - cy, d = Math.hypot(dx, dy);
+              if (b.alive && d > Ra - R) { const k = (Ra - R) / d; b.x = cx + dx * k; b.y = cy + dy * k; }
+            });
+          });
+
+          function newMatch() {
+            geometry();
+            GAP_A = GAP0; rotA = 0; fm = 1; rm = 1;
+            const n = CODES.length;
+            // Find the biggest grid cell size that fits all countries inside the ring
+            let s = Ra * 0.6, cells = [];
+            for (; s > 6; s -= 0.5) {
+              cells = [];
+              for (let y = cy - Ra; y <= cy + Ra; y += s) for (let x = cx - Ra; x <= cx + Ra; x += s) {
+                const px = x + s / 2, py = y + s / 2, d = Math.hypot(px - cx, py - cy);
+                if (d > Ra - s * 0.5) continue;
+                if (Math.abs(norm(Math.atan2(py - cy, px - cx) - GAP_A)) < 0.9 && d > Ra * 0.55) continue; // keep start away from the opening
+                cells.push([px, py]);
+              }
+              if (cells.length >= n) break;
+            }
+            cells.sort(() => Math.random() - 0.5);
+            R = s * 0.46;
+            balls = CODES.map((code, i) => {
+              const a = Math.random() * 6.283, c = cells[i] || [cx, cy];
+              return { code, name: nameOf(code), flag: flagOf(code), alive: true, fade: 0,
+                x: c[0], y: c[1], vx: Math.cos(a) * SPEED, vy: Math.sin(a) * SPEED };
+            });
+            left = n; elapsed = 0; over = false; matches++;
+            winEl.hidden = true; mtEl.textContent = matches; feedEl.textContent = 'Touch a red ring tip or leave through the opening and you are out';
+          }
+
+          function step(dt) {
+            elapsed += dt;
+            // Speed-up phases (ring and flags): 30 left = 2x, 20 left = 2.7x, 10 left = 3.5x
+            const fmT = left <= 10 ? 3.5 : left <= 20 ? 2.7 : left <= 30 ? 2 : 1, rmT = fmT;
+            fm += (fmT - fm) * Math.min(1, dt * 3); rm += (rmT - rm) * Math.min(1, dt * 3);
+            rotA += ROT * rm * dt; GAP_A = GAP0 + rotA; // the ring keeps turning
+            const Rt = Math.min(30, Math.max(7, Ra * Math.sqrt(0.42 / Math.max(left, 1))));
+            R += (Rt - R) * Math.min(1, dt * 1.5);
+            const al = [];
+            for (const b of balls) {
+              if (!b.alive) { if (b.fade > 0) { b.x += b.vx * dt; b.y += b.vy * dt; b.fade -= dt; } continue; }
+              b.x += b.vx * dt * fm; b.y += b.vy * dt * fm;
+              // Touching either tip of the ring = out
+              if (left > 1) {
+                const gh = gapHalf();
+                for (const s of [-1, 1]) {
+                  const ex = cx + Math.cos(GAP_A + s * gh) * Ra, ey = cy + Math.sin(GAP_A + s * gh) * Ra;
+                  if (Math.hypot(b.x - ex, b.y - ey) < R * 0.8 + 4) {
+                    b.alive = false; b.fade = 0.8; left--;
+                    feedEl.textContent = b.flag + ' ' + b.name + ' hit the ring tip: out';
+                    break;
+                  }
+                }
+                if (!b.alive) continue;
+              }
+              const dx = b.x - cx, dy = b.y - cy, d = Math.hypot(dx, dy) || 0.001;
+              if (d > Ra - R) {
+                if (inGap(Math.atan2(dy, dx))) {
+                  if (d > Ra && left > 1) { // crossed the ring through the opening: out
+                    b.alive = false; b.fade = 0.8; left--;
+                    feedEl.textContent = b.flag + ' ' + b.name + ' is out';
+                    continue;
+                  }
+                } else { // bounce off the ring wall
+                  const nx = -dx / d, ny = -dy / d, vn = b.vx * nx + b.vy * ny;
+                  if (vn < 0) { b.vx -= 2 * vn * nx; b.vy -= 2 * vn * ny; }
+                  const k = (Ra - R) / d; b.x = cx + dx * k; b.y = cy + dy * k;
+                }
+              }
+              al.push(b);
+            }
+            // Countries bounce off each other
+            for (let i = 0; i < al.length; i++) for (let j = i + 1; j < al.length; j++) {
+              const a = al[i], b = al[j], dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy, m = 2 * R;
+              if (d2 >= m * m || d2 === 0) continue;
+              const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, p = (m - d) / 2;
+              a.x -= nx * p; a.y -= ny * p; b.x += nx * p; b.y += ny * p;
+              const dvn = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+              if (dvn > 0) { a.vx -= dvn * nx; a.vy -= dvn * ny; b.vx += dvn * nx; b.vy += dvn * ny; }
+            }
+            if (left <= 1) finish();
+          }
+
+          function finish() {
+            const w = balls.find(b => b.alive) || balls[0];
+            over = true; overT = 0;
+            document.getElementById('wflag').textContent = w.flag;
+            document.getElementById('wname').textContent = w.name;
+            winEl.hidden = false;
+          }
+
+          function draw() {
+            ctx.clearRect(0, 0, W, H);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            // Ring with an opening at the top
+            const gh = gapHalf();
+            ctx.beginPath(); ctx.arc(cx, cy, Ra, GAP_A + gh, GAP_A - gh + 6.283);
+            ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.strokeStyle = col.ink; ctx.stroke();
+            ctx.fillStyle = '#e5484d'; // red tips of the ring
+            for (const s of [-1, 1]) { ctx.beginPath(); ctx.arc(cx + Math.cos(GAP_A + s * gh) * Ra, cy + Math.sin(GAP_A + s * gh) * Ra, 6, 0, 6.283); ctx.fill(); }
+            ctx.font = '700 12px "Hind Siliguri", system-ui, sans-serif'; ctx.fillStyle = col.accent;
+            ctx.fillText('EXIT', cx + Math.cos(GAP_A) * (Ra + 15), cy + Math.sin(GAP_A) * (Ra + 15));
+            // Countries
+            ctx.font = Math.round(R * 1.45) + 'px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif';
+            for (const b of balls) {
+              if (!b.alive && b.fade <= 0) continue;
+              ctx.globalAlpha = b.alive ? 1 : Math.max(0, b.fade / 0.8);
+              ctx.beginPath(); ctx.arc(b.x, b.y, R, 0, 6.283);
+              ctx.fillStyle = col.ball; ctx.fill();
+              ctx.lineWidth = 1.5; ctx.strokeStyle = col.ink; ctx.globalAlpha *= 0.35; ctx.stroke();
+              ctx.globalAlpha = b.alive ? 1 : Math.max(0, b.fade / 0.8);
+              ctx.fillText(b.flag, b.x, b.y + R * 0.05);
+            }
+            ctx.globalAlpha = 1;
+          }
+
+          function loop(t) {
+            const dt = Math.min((t - last) / 1000, 0.05); last = t;
+            if (over) {
+              overT += dt;
+              countEl.textContent = 'Next match in ' + Math.max(1, Math.ceil(WAIT - overT)) + 's…';
+              if (overT >= WAIT) newMatch();
+            } else { step(dt); leftEl.textContent = Math.max(left, 1); }
+            draw();
+            requestAnimationFrame(loop);
+          }
+
+          // Ask the phone to keep the screen on while the game runs (if the browser allows it)
+          let wl = null;
+          async function keepAwake() {
+            try {
+              if (wl && !wl.released) return;
+              if ('wakeLock' in navigator && document.visibilityState === 'visible') wl = await navigator.wakeLock.request('screen');
+            } catch (e) {}
+          }
+          document.addEventListener('visibilitychange', keepAwake);
+          window.addEventListener('pointerdown', keepAwake);
+          keepAwake();
+
+          geometry();
+          newMatch();
+          requestAnimationFrame(t => { last = t; loop(t); });
+          </script>
+          </body>
+          </html>
+          HTMLEOF
+      - name: Build the APK
+        run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flag-battle-game-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
